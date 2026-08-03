@@ -31,7 +31,7 @@ Expectations have these precise meanings:
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently the cache service).
+  intentionally unsupported.
 - `future`: the fixture is inventoried but not yet required to compile.
 
 Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
@@ -43,12 +43,22 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 `hosted-tokenless`. It anonymously resolves actions, compiles plans, and applies
 the same admission policy as production upload without installing or executing
 Node. Admission does not execute action code or prove that a generic action is
-independent of GitHub-only artifact, cache, token, or OIDC services.
+independent of GitHub-only artifact, token, OIDC, or noncanonical cache
+services.
 The exact audited `actions/upload-artifact` and exact-name
 `actions/download-artifact` commits are admitted through bounded native
-adapters. Cache actions, artifact merge and broad download modes, and
-unsupported commits remain rejected; the profile leaves unknown generic
-service dependencies as an explicit warning rather than guessing from
+adapters. Canonical `actions/cache`, `actions/cache/restore`, and
+`actions/cache/save` have experimental host support from v4.2.0, including in
+nested composites. Clearly older semantic refs, background or job-container
+use, and noncanonical cache integrations remain rejected; moving tags, SHAs,
+`main`, branches, and opaque refs currently have no allowlist. Each cache phase
+uses a fresh token, the fixed `https://isaacsu-ghacs.buildkite.dev/` v2 service,
+and a 14-minute cap. It relies on image-provided `tar`/`zstd`, strips
+Node/process and proxy injection variables, and leaves trust, namespace, and
+read/write policy to the server. A dedicated capability and schema revision
+remain future hardening. Artifact merge and broad download modes and
+unsupported artifact commits remain rejected; the profile leaves unknown
+generic service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are
 deliberately not marked for this profile: their execution is proven separately,
 while production hosted-tokenless admission continues to reject their container

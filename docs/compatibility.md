@@ -22,7 +22,8 @@ There are three different compatibility claims:
 
 Compilation alone is not admission, and admission does not execute arbitrary
 action code. In particular, an otherwise valid action may depend on a GitHub
-artifact, cache, token, or OIDC service that this project does not provide.
+artifact, token, OIDC, or noncanonical cache service that this project does not
+provide.
 
 ## Support matrix
 
@@ -44,9 +45,10 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
 | `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
+| `actions/cache` | Experimental | Canonical root, restore, and save actions use the fixed Buildkite GitHub-Actions-compatible v2 results service on host jobs. See the constraints below. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
-| Artifact cache and broad download modes | Not supported | Cache, merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
+| Broad artifact download modes | Not supported | Merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
 | Private repositories or actions | Not supported | The preview has no private-source capability broker. |
 | Secrets and provider tokens | Not supported | Includes `GITHUB_TOKEN`, GitHub App tokens, and protected environment grants. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
@@ -152,6 +154,41 @@ ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
 mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
 fabricated. Exact-commit Buildkite build 270 and its independent artifact
 observation prove the producer-to-two-consumer roundtrip contract.
+
+### Canonical cache actions have experimental v2 support
+
+Cache credentials are provisioned only for the exact canonical identities
+`actions/cache`, `actions/cache/restore`, and `actions/cache/save`. The root
+restore/post-save lifecycle and the restore-only and save-only forms are
+supported, including when nested in verified composite actions. Cache use in a
+background step (directly or anywhere in its composite action tree) and cache
+use inside a job container are rejected. Forks, workspace lookalikes, unknown
+paths, and third-party actions that merely use the cache toolkit do not receive
+credentials.
+
+The documented and tested minimum is v4.2.0. Refs that clearly denote v1-v3 or
+a semantic version older than v4.2.0 are rejected. Moving major tags, literal
+SHAs, `main`, branches, and other opaque refs are admitted without a commit
+allowlist for this initial preview; the resolved commit and complete source
+tree are still bound and verified. A dedicated `actions-cache` plan capability,
+new immutable schema version, and tighter release/commit policy are future
+hardening options rather than current guarantees.
+
+Each main or post phase receives a fresh token and has an independent 14-minute
+cap. The action is forced into v2 mode with
+`ACTIONS_RESULTS_URL=https://isaacsu-ghacs.buildkite.dev/` and
+`ACTIONS_CACHE_SERVICE_V2=true`; legacy cache/runtime URLs are absent. The
+agent image must provide `tar`, `zstd`, and any other tools expected by the
+upstream action.
+
+Credential-bearing cache phases strip workflow-provided Node/process injection
+settings (`NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS`,
+`NODE_TLS_REJECT_UNAUTHORIZED`, `SSLKEYLOGFILE`, `LD_PRELOAD`, and
+`LD_LIBRARY_PATH`) and all upper- and lower-case HTTP, HTTPS, ALL, and NO proxy
+variables. The runtime-owned service settings are overlaid last. Trust and
+untrusted-branch decisions, cache namespaces, and read/write authorization are
+owned by the token minter and cache service, not by workflow configuration or
+the runner.
 
 ### Failures stay explicit
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -108,6 +109,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		r.artifactRegistry = &artifactRegistry{names: make(map[string]bool)}
 	}
 	if err := job.Validate(); err != nil {
+		return JobResult{}, err
+	}
+	if err := validateActionsCachePlan(job); err != nil {
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
@@ -424,7 +428,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
-		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
+		postCtx := cleanupCtx
+		if post.action.cacheOperation != "" {
+			postCtx = context.Background()
+		}
+		postErr := r.runJavaScriptPhase(postCtx, processor, post.node, post.action, javaScriptPhasePost, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
@@ -815,6 +823,10 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return result, fmt.Errorf("action %q: %w", step.Uses, err)
 	}
+	cacheOperation, _, err := classifyActionsCacheLock(lock)
+	if err != nil {
+		return result, err
+	}
 
 	switch runtime {
 	case metadata.RuntimeNode20, metadata.RuntimeNode24:
@@ -838,7 +850,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if runtime == metadata.RuntimeNode20 {
 			major, explicit = 20, r.Node20
 		}
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major, cacheOperation: cacheOperation}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -867,7 +879,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
-			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
+			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhasePre, javascript.Pre, nil, invocation.state, &result); err != nil {
 				return result, err
 			}
 		}
@@ -1062,7 +1074,14 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, nodeMajor: major}
+		cacheOperation := actionintegration.ActionsCacheOperation("")
+		if actionLock != nil {
+			cacheOperation, _, err = classifyActionsCacheLock(*actionLock)
+			if err != nil {
+				return result, err
+			}
+		}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, nodeMajor: major, cacheOperation: cacheOperation}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1087,12 +1106,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if javascript.Pre != "" && !wasPrepared {
 			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
 			if runPre {
-				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
+				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhasePre, javascript.Pre, nil, state, &result); err != nil {
 					return result, err
 				}
 			}
 		}
-		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
+		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhaseMain, javascript.Main, nil, state, &result); err != nil {
 			return result, err
 		}
 		return result, nil

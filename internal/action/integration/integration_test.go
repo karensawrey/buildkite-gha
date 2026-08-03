@@ -3,6 +3,8 @@ package integration
 import (
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
 
 func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
@@ -118,6 +120,69 @@ func TestLookupDoesNotBroadenCanonicalIdentity(t *testing.T) {
 		if descriptor, ok := Lookup(identity); ok {
 			t.Fatalf("Lookup(%#v) = %#v, true, want no integration", identity, descriptor)
 		}
+	}
+}
+
+func TestClassifyActionsCacheExactIdentity(t *testing.T) {
+	for _, test := range []struct {
+		identity  Identity
+		operation ActionsCacheOperation
+		ok        bool
+	}{
+		{identity: Identity{Source: "github", Repository: "actions/cache"}, operation: ActionsCacheRoot, ok: true},
+		{identity: Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, operation: ActionsCacheRestore, ok: true},
+		{identity: Identity{Source: "github", Repository: "actions/cache", Path: "save"}, operation: ActionsCacheSave, ok: true},
+		{identity: Identity{Source: "workspace", Repository: "actions/cache"}},
+		{identity: Identity{Source: "github", Repository: "owner/cache"}},
+		{identity: Identity{Source: "github", Repository: "actions/cache", Path: "nested"}},
+	} {
+		operation, ok := ClassifyActionsCache(test.identity)
+		if operation != test.operation || ok != test.ok {
+			t.Fatalf("ClassifyActionsCache(%#v) = %q, %t, want %q, %t", test.identity, operation, ok, test.operation, test.ok)
+		}
+	}
+}
+
+func TestValidateActionsCacheRequestedRef(t *testing.T) {
+	for _, ref := range []string{"v4", "v4.2", "v4.2.0", "v4.2.1", "v5", "5.0.0", strings.Repeat("a", 40), "main", "arbitrary-branch", "releases/v3"} {
+		if err := ValidateActionsCacheRequestedRef(ref); err != nil {
+			t.Errorf("ValidateActionsCacheRequestedRef(%q) = %v", ref, err)
+		}
+	}
+	for _, ref := range []string{"v0.9.0", "v1", "v2", "v3", "v3.9.9", "4.0.0", "v4.1", "v4.1.9", "v4.2.0-beta.1"} {
+		if err := ValidateActionsCacheRequestedRef(ref); err == nil {
+			t.Errorf("ValidateActionsCacheRequestedRef(%q) succeeded", ref)
+		}
+	}
+}
+
+func TestValidateActionsCacheLifecycle(t *testing.T) {
+	validRoot := metadata.Runs{Using: "node20", Main: "dist/restore/index.js", Post: "dist/save/index.js", PostIf: "success()"}
+	validLeaf := metadata.Runs{Using: "node24", Main: "dist/index.js"}
+	for operation, runs := range map[ActionsCacheOperation]metadata.Runs{
+		ActionsCacheRoot: validRoot, ActionsCacheRestore: validLeaf, ActionsCacheSave: validLeaf,
+	} {
+		if err := ValidateActionsCacheLifecycle(operation, runs); err != nil {
+			t.Fatalf("ValidateActionsCacheLifecycle(%q) = %v", operation, err)
+		}
+	}
+	for name, test := range map[string]struct {
+		operation ActionsCacheOperation
+		runs      metadata.Runs
+	}{
+		"unsupported runtime": {ActionsCacheRoot, metadata.Runs{Using: "composite", Main: "main.js", Post: "post.js"}},
+		"pre":                 {ActionsCacheRoot, metadata.Runs{Using: "node20", Pre: "pre.js", Main: "main.js", Post: "post.js"}},
+		"pre condition":       {ActionsCacheRoot, metadata.Runs{Using: "node20", PreIf: "always()", Main: "main.js", Post: "post.js"}},
+		"missing main":        {ActionsCacheRoot, metadata.Runs{Using: "node20", Post: "post.js"}},
+		"missing root post":   {ActionsCacheRoot, metadata.Runs{Using: "node20", Main: "main.js"}},
+		"restore post":        {ActionsCacheRestore, metadata.Runs{Using: "node20", Main: "main.js", Post: "post.js"}},
+		"save post condition": {ActionsCacheSave, metadata.Runs{Using: "node20", Main: "main.js", PostIf: "success()"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateActionsCacheLifecycle(test.operation, test.runs); err == nil {
+				t.Fatal("unsupported lifecycle accepted")
+			}
+		})
 	}
 }
 

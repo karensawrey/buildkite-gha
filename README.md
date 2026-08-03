@@ -78,14 +78,15 @@ The plugin path currently supports:
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
 - public, credential-free checkout of the event repository at its exact commit;
-  and
+- experimental support for the canonical `actions/cache`,
+  `actions/cache/restore`, and `actions/cache/save` actions on the host; and
 - bounded native upload and exact-name download for the audited artifact v4 commits.
 
 It does **not** currently support:
 
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
-- `actions/cache`, artifact merge/all/pattern/ID modes, or cross-run downloads;
+- artifact merge/all/pattern/ID modes or cross-run downloads;
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
 - job containers or service containers through the production plugin path;
@@ -94,7 +95,8 @@ It does **not** currently support:
 
 The underlying runtime has broader container coverage than the production
 plugin currently exposes. See the [compatibility and CLI guide](docs/compatibility.md)
-for the exact distinction and intentional behavior differences.
+for the exact distinction, cache preview constraints, and intentional behavior
+differences.
 
 ## Check before running
 

@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -45,31 +46,32 @@ const (
 
 // Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
-	Stdout            io.Writer
-	Stderr            io.Writer
-	Node20            string
-	Node24            string
-	ManagedNodeRoot   string
-	Mise              string
-	MiseDataDir       string
-	Docker            string
-	RuntimeExecutable string
-	Git               string
-	CleanupTimeout    time.Duration
-	InterruptGrace    time.Duration
-	TerminateGrace    time.Duration
-	Secrets           SecretResolver
-	Redactor          Redactor
-	Actions           ActionMaterializer
-	Artifacts         ArtifactStore
-	runnerTemp        string
-	implicitJobPATH   string
-	explicitJobPATH   bool
-	jobContainer      *jobContainerBackend
-	jobDocker         *jobContainerBackend
-	nodeVerification  *managedNodeVerification
-	nodeDigests       map[int]string
-	artifactRegistry  *artifactRegistry
+	Stdout             io.Writer
+	Stderr             io.Writer
+	Node20             string
+	Node24             string
+	ManagedNodeRoot    string
+	Mise               string
+	MiseDataDir        string
+	Docker             string
+	RuntimeExecutable  string
+	Git                string
+	CleanupTimeout     time.Duration
+	InterruptGrace     time.Duration
+	TerminateGrace     time.Duration
+	Secrets            SecretResolver
+	Redactor           Redactor
+	Actions            ActionMaterializer
+	ActionsCacheTokens ActionsCacheTokenSource
+	Artifacts          ArtifactStore
+	runnerTemp         string
+	implicitJobPATH    string
+	explicitJobPATH    bool
+	jobContainer       *jobContainerBackend
+	jobDocker          *jobContainerBackend
+	nodeVerification   *managedNodeVerification
+	nodeDigests        map[int]string
+	artifactRegistry   *artifactRegistry
 }
 
 type managedNodeVerification struct {
@@ -87,8 +89,17 @@ type JavaScriptAction struct {
 	Inputs map[string]string
 	Env    map[string]string
 
-	nodeMajor int
+	nodeMajor      int
+	cacheOperation actionintegration.ActionsCacheOperation
 }
+
+type javaScriptPhase string
+
+const (
+	javaScriptPhasePre  javaScriptPhase = "pre"
+	javaScriptPhaseMain javaScriptPhase = "main"
+	javaScriptPhasePost javaScriptPhase = "post"
+)
 
 // DockerAction is an already-resolved local Docker action.
 type DockerAction struct {
@@ -532,7 +543,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, phase javaScriptPhase, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -541,9 +552,46 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
+	phaseCtx := ctx
+	cancelPhase := func() {}
+	protectedToken := ""
+	var beforeResult Result
+	var beforeState map[string]string
+	if action.cacheOperation != "" {
+		if err := validateActionsCacheInvocation(action, phase, entry); err != nil {
+			return err
+		}
+		if r.jobContainer != nil {
+			return fmt.Errorf("actions/cache is unsupported inside a job container")
+		}
+		if r.ActionsCacheTokens == nil {
+			return fmt.Errorf("actions/cache token source is unavailable")
+		}
+		token, err := r.ActionsCacheTokens.Mint(ctx)
+		if err != nil {
+			return fmt.Errorf("provision actions/cache credentials: %w", err)
+		}
+		if err := validateActionsCacheToken(token); err != nil {
+			return fmt.Errorf("provision actions/cache credentials: %w", err)
+		}
+		processor.addMask(token)
+		if r.Redactor == nil {
+			return fmt.Errorf("provision actions/cache credentials: external redactor is unavailable")
+		}
+		if err := r.Redactor.AddRedaction(ctx, token); err != nil {
+			return fmt.Errorf("provision actions/cache credentials: %w", processor.scrubError(err))
+		}
+		env = actionsCacheEnvironment(env, token)
+		phaseCtx, cancelPhase = context.WithTimeout(ctx, actionsCachePhaseTimeout)
+		protectedToken = token
+		beforeResult = cloneResult(*result)
+		beforeState = cloneStrings(stateOut)
+		processor.beginProtected(token)
+	}
+	defer cancelPhase()
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {
-		if err := r.jobContainer.probeNode(ctx, node, action.nodeMajor); err != nil {
+		if err := r.jobContainer.probeNode(phaseCtx, node, action.nodeMajor); err != nil {
 			return err
 		}
 		absNode, err := filepath.Abs(node)
@@ -554,10 +602,113 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, name, args...); err != nil {
-		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
+	err := r.runProcess(phaseCtx, processor, action.Path, env, result, stateOut, name, args...)
+	if protectedToken != "" {
+		leaked := processor.endProtected(protectedToken) || resultContains(*result, protectedToken) || errorContains(err, protectedToken)
+		if leaked {
+			*result = beforeResult
+			restoreStringMap(stateOut, beforeState)
+			leakErr := fmt.Errorf("actions/cache runtime token leakage detected; phase effects were discarded")
+			if err != nil {
+				leakErr = errors.Join(processor.scrubError(err), leakErr)
+			}
+			return fmt.Errorf("JavaScript action %q %s phase: %w", action.Name, phase, leakErr)
+		}
+		err = processor.scrubError(err)
+	}
+	if err != nil {
+		return fmt.Errorf("JavaScript action %q %s entry %q: %w", action.Name, phase, entry, err)
 	}
 	return nil
+}
+
+func validateActionsCacheInvocation(action JavaScriptAction, phase javaScriptPhase, entry string) error {
+	if action.nodeMajor != 20 && action.nodeMajor != 24 || action.Pre != "" || action.Main == "" {
+		return fmt.Errorf("actions/cache invocation has an unsupported JavaScript lifecycle")
+	}
+	switch action.cacheOperation {
+	case actionintegration.ActionsCacheRoot:
+		if action.Post == "" || phase != javaScriptPhaseMain && phase != javaScriptPhasePost {
+			return fmt.Errorf("actions/cache root invocation has an unsupported %s phase", phase)
+		}
+	case actionintegration.ActionsCacheRestore, actionintegration.ActionsCacheSave:
+		if action.Post != "" || phase != javaScriptPhaseMain {
+			return fmt.Errorf("actions/cache %s invocation has an unsupported %s phase", action.cacheOperation, phase)
+		}
+	default:
+		return fmt.Errorf("unknown actions/cache operation %q", action.cacheOperation)
+	}
+	expected := action.Main
+	if phase == javaScriptPhasePost {
+		expected = action.Post
+	}
+	if entry != expected {
+		return fmt.Errorf("actions/cache %s phase entry point does not match verified metadata", phase)
+	}
+	return nil
+}
+
+func actionsCacheEnvironment(env map[string]string, token string) map[string]string {
+	env = cloneStrings(env)
+	for _, name := range []string{
+		"ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
+		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_PRELOAD", "LD_LIBRARY_PATH",
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
+	} {
+		delete(env, name)
+	}
+	env["ACTIONS_RESULTS_URL"] = actionsCacheResultsURL
+	env["ACTIONS_CACHE_SERVICE_V2"] = "true"
+	env["ACTIONS_RUNTIME_TOKEN"] = token
+	return env
+}
+
+func cloneResult(result Result) Result {
+	result.Outputs = cloneStrings(result.Outputs)
+	result.Env = cloneStrings(result.Env)
+	result.State = cloneStrings(result.State)
+	result.Paths = append([]string(nil), result.Paths...)
+	result.Artifacts = append([]transport.ResultArtifact(nil), result.Artifacts...)
+	return result
+}
+
+func restoreStringMap(target, source map[string]string) {
+	if target == nil {
+		return
+	}
+	for name := range target {
+		delete(target, name)
+	}
+	mergeInto(target, source)
+}
+
+func resultContains(result Result, value string) bool {
+	for _, values := range []map[string]string{result.Outputs, result.Env, result.State} {
+		for name, candidate := range values {
+			if strings.Contains(name, value) || strings.Contains(candidate, value) {
+				return true
+			}
+		}
+	}
+	if strings.Contains(result.Summary, value) {
+		return true
+	}
+	for _, path := range result.Paths {
+		if strings.Contains(path, value) {
+			return true
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if strings.Contains(artifact.Name, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func errorContains(err error, value string) bool {
+	return err != nil && strings.Contains(err.Error(), value)
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
@@ -1122,6 +1273,8 @@ type commandProcessor struct {
 	errors    workflowCommandAnnotationBuffer
 	stopToken string
 	discard   bool
+	protected map[string]int
+	leaked    map[string]bool
 }
 
 type workflowCommandAnnotationBuffer struct {
@@ -1151,6 +1304,12 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 	defer p.mu.Unlock()
 	if p.discard {
 		return nil
+	}
+	for value := range p.protected {
+		if strings.Contains(line, value) {
+			p.leaked[value] = true
+			line = strings.ReplaceAll(line, value, "***")
+		}
 	}
 	command, isCommand := parseWorkflowCommand(line)
 	if p.stopToken != "" {
@@ -1240,6 +1399,32 @@ func (p *commandProcessor) addMask(value string) {
 	p.mu.Lock()
 	p.addMaskLocked(value)
 	p.mu.Unlock()
+}
+
+func (p *commandProcessor) beginProtected(value string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.protected == nil {
+		p.protected = map[string]int{}
+	}
+	if p.leaked == nil {
+		p.leaked = map[string]bool{}
+	}
+	p.protected[value]++
+	p.leaked[value] = false
+}
+
+func (p *commandProcessor) endProtected(value string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	leaked := p.leaked[value]
+	if p.protected[value] <= 1 {
+		delete(p.protected, value)
+		delete(p.leaked, value)
+	} else {
+		p.protected[value]--
+	}
+	return leaked
 }
 
 func (p *commandProcessor) maskValues() []string {

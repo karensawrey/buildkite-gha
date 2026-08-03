@@ -123,6 +123,11 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
 	}
+	if operation, ok := actionintegration.ClassifyActionsCache(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}); ok {
+		if err := actionintegration.ValidateActionsCacheLifecycle(operation, m.Runs); err != nil {
+			return nil, err
+		}
+	}
 	for _, capability := range runtime.RequiredCapabilities() {
 		b.caps[capability] = true
 	}
@@ -169,13 +174,19 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	if b.source == nil {
 		return "", plan.ActionLock{}, "", "", fmt.Errorf("remote action source is not configured")
 	}
+	identity := actionintegration.Identity{Source: "github", Repository: canonical, Path: ref.Path}
+	if _, ok := actionintegration.ClassifyActionsCache(identity); ok {
+		if err := actionintegration.ValidateActionsCacheRequestedRef(ref.Ref); err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	resolved, materialized, err := b.source.Fetch(ctx, ref)
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	descriptor, _ := actionintegration.Lookup(identity)
 	if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 		if err := actionintegration.ValidateUploadArtifactCommit(lock.Commit); err != nil {
 			return "", plan.ActionLock{}, "", "", err
@@ -188,6 +199,26 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	b.caps["network"] = true
 	return key, lock, materialized.RepositoryRoot, ref.Path, nil
+}
+
+func actionGraphContainsActionsCache(selector plan.ActionSelector, locks map[string]plan.ActionLock, seen map[string]bool) bool {
+	if selector.Lock == "" || seen[selector.Lock] {
+		return false
+	}
+	seen[selector.Lock] = true
+	lock, ok := locks[selector.Lock]
+	if !ok {
+		return false
+	}
+	if _, ok := actionintegration.ClassifyActionsCache(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}); ok {
+		return true
+	}
+	for _, child := range lock.Children {
+		if actionGraphContainsActionsCache(child, locks, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 type memoizedActionSource struct {

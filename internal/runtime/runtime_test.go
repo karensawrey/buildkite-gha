@@ -2791,7 +2791,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	}
 	result := newResult()
 	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, javaScriptPhaseMain, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
