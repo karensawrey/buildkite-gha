@@ -333,7 +333,13 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 	store := &downloadStore{archive: archive}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: sourceDigest}}
 	result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(context.Background(), job, workspace)
-	if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != filepath.Join(workspace, "downloaded") {
+	// The runner canonicalizes the workspace, so download-path is reported
+	// under the physical spelling to stay consistent with GITHUB_WORKSPACE.
+	resolvedWorkspace, evalErr := filepath.EvalSymlinks(workspace)
+	if evalErr != nil {
+		t.Fatal(evalErr)
+	}
+	if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != filepath.Join(resolvedWorkspace, "downloaded") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	if materializer.calls != 1 || store.path != artifact.Path || store.jobID != artifact.Producer.JobID {

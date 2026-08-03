@@ -190,6 +190,12 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 	if e != nil {
 		return newResult(), fmt.Errorf("resolve workspace: %w", e)
 	}
+	// Canonicalize so the workspace matches every consumer's physical view;
+	// see RunJob for the full rationale (macOS /var -> private/var symlink).
+	abs, e = filepath.EvalSymlinks(abs)
+	if e != nil {
+		return newResult(), fmt.Errorf("canonicalize workspace: %w", e)
+	}
 	action.Workspace = abs
 	_, action.explicitPATH = action.Env["PATH"]
 	workspace, e := os.Open(abs)
@@ -212,6 +218,10 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 		return newResult(), e
 	}
 	defer func() { _ = os.RemoveAll(temp) }()
+	temp, e = filepath.EvalSymlinks(temp)
+	if e != nil {
+		return newResult(), fmt.Errorf("canonicalize runner temp: %w", e)
+	}
 	if e := os.Chmod(temp, 0o777); e != nil {
 		return newResult(), fmt.Errorf("make Docker runner temp writable: %w", e)
 	}

@@ -180,6 +180,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return jobResult, fmt.Errorf("resolve workspace: %w", err)
 	}
+	// Canonicalize the workspace so GITHUB_WORKSPACE matches every consumer's
+	// physical view (Node's process.cwd, tar's -C, glob results). On macOS
+	// TMPDIR lives under /var -> private/var; leaving the logical spelling here
+	// makes @actions/cache compute broken ../ relative paths and fail on save.
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return jobResult, fmt.Errorf("canonicalize workspace: %w", err)
+	}
 	if job.HasCapability("docker") {
 		workspaceDir, err := os.Open(workspace)
 		if err != nil {
@@ -207,6 +215,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(runnerTemp) }()
+	// Canonicalize for the same reason as the workspace: RUNNER_TEMP holds the
+	// @actions/cache archive and is used as a bind-mount host key, both of which
+	// break if the logical and physical spellings disagree.
+	runnerTemp, err = filepath.EvalSymlinks(runnerTemp)
+	if err != nil {
+		return jobResult, fmt.Errorf("canonicalize runner temp: %w", err)
+	}
 	if job.HasCapability("docker") {
 		if err := os.Chmod(runnerTemp, 0o777); err != nil {
 			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)

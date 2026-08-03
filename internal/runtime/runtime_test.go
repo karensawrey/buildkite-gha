@@ -1446,7 +1446,7 @@ func TestJavaScriptActionRunsWithWorkspaceCWD(t *testing.T) {
 	writeFixtureFile(t, workspace, ".github/actions/cwd-probe/action.yml", "name: Cwd probe\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, workspace, fmt.Sprintf(".github/actions/cwd-probe/%s.js", phase), fmt.Sprintf(`
-require('fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\n')
+require('fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t' + process.env.GITHUB_WORKSPACE + '\n')
 `, phase+":"))
 	}
 	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
@@ -1462,25 +1462,73 @@ require('fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\n')
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The invariant @actions/cache depends on: the action's process.cwd() must
+	// be the exact same spelling as GITHUB_WORKSPACE, byte for byte. Resolving
+	// both sides before comparing (the old assertion) hid the /var vs
+	// /private/var mismatch that broke tar's -C relative paths.
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		phase, cwd, ok := strings.Cut(line, ":")
+		phase, rest, ok := strings.Cut(line, ":")
 		if !ok {
 			t.Fatalf("cwd log line %q is malformed", line)
 		}
-		resolvedCwd, err := filepath.EvalSymlinks(cwd)
-		if err != nil {
-			t.Fatalf("resolve %s cwd %q: %v", phase, cwd, err)
+		cwd, workspaceEnv, ok := strings.Cut(rest, "\t")
+		if !ok {
+			t.Fatalf("cwd log line %q is malformed", line)
 		}
-		if resolvedCwd != resolvedWorkspace {
-			t.Fatalf("%s phase cwd = %q, want job workspace %q", phase, cwd, workspace)
+		if cwd != workspaceEnv {
+			t.Fatalf("%s phase cwd = %q, want it to equal GITHUB_WORKSPACE %q", phase, cwd, workspaceEnv)
 		}
 	}
 	if got := strings.Count(string(data), ":"); got != 3 {
 		t.Fatalf("cwd log = %q, want pre/main/post entries", data)
+	}
+}
+
+func TestJavaScriptActionRunsWithSymlinkedWorkspaceCWD(t *testing.T) {
+	node := requireNode24(t)
+	// Deliberately place the workspace under a symlinked parent so process.cwd()
+	// (physical) and GITHUB_WORKSPACE diverge unless the runner canonicalizes
+	// the workspace at its source. On macOS t.TempDir() is already under the
+	// /var -> private/var symlink; the explicit link makes this fail on Linux
+	// too.
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(base, "link")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	workspace := filepath.Join(linkParent, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/cwd-probe/action.yml", "name: Cwd probe\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cwd-probe/main.js", `
+require('fs').appendFileSync(process.env.CWD_LOG, process.cwd() + '\t' + process.env.GITHUB_WORKSPACE + '\n')
+`)
+	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "probe", Kind: "uses", Uses: "./.github/actions/cwd-probe", Env: map[string]string{"CWD_LOG": cwdLog}},
+	})
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	data, err := os.ReadFile(cwdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd, workspaceEnv, ok := strings.Cut(strings.TrimSpace(string(data)), "\t")
+	if !ok {
+		t.Fatalf("cwd log %q is malformed", data)
+	}
+	if cwd != workspaceEnv {
+		t.Fatalf("cwd = %q, want it to equal GITHUB_WORKSPACE %q", cwd, workspaceEnv)
 	}
 }
 

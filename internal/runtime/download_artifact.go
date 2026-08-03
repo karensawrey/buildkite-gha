@@ -48,15 +48,14 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	if p := values["path"]; p != "" {
 		destinationRelative = filepath.FromSlash(p)
 	}
-	logicalWorkspace, err := filepath.Abs(workspace)
+	// The job workspace is already canonicalized at its source (RunJob), so a
+	// single Abs guard is enough here for any direct callers passing a relative
+	// path.
+	workspace, err := filepath.Abs(workspace)
 	if err != nil {
 		return result, err
 	}
-	resolvedWorkspace, err := filepath.EvalSymlinks(logicalWorkspace)
-	if err != nil {
-		return result, fmt.Errorf("resolve download workspace: %w", err)
-	}
-	absDestination := filepath.Join(logicalWorkspace, destinationRelative)
+	absDestination := filepath.Join(workspace, destinationRelative)
 	var matches []plan.NeedArtifact
 	for _, need := range needs {
 		for _, artifact := range need.Artifacts {
@@ -111,7 +110,7 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	if err := verifyDownloadDigest(ctx, archivePath, artifact.Digest, artifact.Size); err != nil {
 		return result, err
 	}
-	if err := extractDownloadZIP(ctx, archivePath, resolvedWorkspace, destinationRelative, artifact.FileCount); err != nil {
+	if err := extractDownloadZIP(ctx, archivePath, workspace, destinationRelative, artifact.FileCount); err != nil {
 		return result, err
 	}
 	result.Outputs["download-path"] = absDestination

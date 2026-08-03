@@ -244,10 +244,6 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	workspace, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		return nil, fmt.Errorf("resolve upload workspace: %w", err)
-	}
 	var files []archiveFile
 	var matchedRoots []string
 	var bytes int64
@@ -421,10 +417,6 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		return "", 0, e
 	}
 	defer func() { err = errors.Join(err, f.Close()) }()
-	workspace, e = filepath.EvalSymlinks(workspace)
-	if e != nil {
-		return "", 0, fmt.Errorf("resolve upload workspace: %w", e)
-	}
 	root, e := os.OpenRoot(workspace)
 	if e != nil {
 		return "", 0, fmt.Errorf("open upload workspace: %w", e)
