@@ -309,6 +309,17 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
 					}
 				}
+				if steps[stepIndex].Background && actionGraphContainsActionsCache(selector, locksByID, map[string]bool{}) {
+					span := instance.Steps[stepIndex].Span.Start
+					return nil, nil, fmt.Errorf("%s:%d:%d: background actions/cache execution is unsupported", instance.SourcePath, span.Line, span.Column)
+				}
+			}
+			if instance.Container != nil {
+				for _, selector := range selectors {
+					if actionGraphContainsActionsCache(selector, locksByID, map[string]bool{}) {
+						return nil, nil, fmt.Errorf("build plan for job %q: actions/cache is unsupported inside a job container", instance.LogicalJobID)
+					}
+				}
 			}
 			jobSchema = plan.SchemaV3
 			actions = locks

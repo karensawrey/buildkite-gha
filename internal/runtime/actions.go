@@ -70,6 +70,62 @@ func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
 	return descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite
 }
 
+func classifyActionsCacheLock(lock plan.ActionLock) (actionintegration.ActionsCacheOperation, bool, error) {
+	operation, ok := actionintegration.ClassifyActionsCache(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	if !ok {
+		return "", false, nil
+	}
+	if err := actionintegration.ValidateActionsCacheRequestedRef(lock.RequestedRef); err != nil {
+		return "", true, err
+	}
+	return operation, true, nil
+}
+
+func actionLockGraphContainsActionsCache(selector plan.ActionSelector, locks map[string]plan.ActionLock, seen map[string]bool) bool {
+	if selector.Lock == "" || seen[selector.Lock] {
+		return false
+	}
+	seen[selector.Lock] = true
+	lock, ok := locks[selector.Lock]
+	if !ok {
+		return false
+	}
+	if _, ok, _ := classifyActionsCacheLock(lock); ok {
+		return true
+	}
+	for _, child := range lock.Children {
+		if actionLockGraphContainsActionsCache(child, locks, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateActionsCachePlan(job plan.Job) error {
+	locks := make(map[string]plan.ActionLock, len(job.Actions))
+	hasCache := false
+	for _, lock := range job.Actions {
+		locks[lock.ID] = lock
+		if _, ok, err := classifyActionsCacheLock(lock); err != nil {
+			return err
+		} else if ok {
+			hasCache = true
+		}
+	}
+	if hasCache && job.Container != nil {
+		return fmt.Errorf("actions/cache is unsupported inside a job container")
+	}
+	for _, step := range job.Steps {
+		if !step.Background || step.Action == nil {
+			continue
+		}
+		if actionLockGraphContainsActionsCache(*step.Action, locks, map[string]bool{}) {
+			return fmt.Errorf("background step %q contains actions/cache, which is unsupported", step.ID)
+		}
+	}
+	return nil
+}
+
 func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {
 	if r == nil || selector.Lock == "" {
 		return "", fmt.Errorf("resolve action lock: selector is missing")
@@ -105,9 +161,12 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 			return metadata.Metadata{}, plan.ActionLock{}, err
 		}
 	}
+	cacheOperation, isCache, err := classifyActionsCacheLock(entry.lock)
+	if err != nil {
+		return metadata.Metadata{}, plan.ActionLock{}, err
+	}
 
 	var m metadata.Metadata
-	var err error
 	switch entry.lock.Source {
 	case "workspace":
 		m, err = r.verifyWorkspace(entry.lock)
@@ -118,6 +177,18 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	}
 	if err != nil {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
+	}
+	if isCache {
+		runtime, err := m.Runtime()
+		if err != nil {
+			return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
+		}
+		if err := m.ValidateEntrypoints(runtime); err != nil {
+			return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
+		}
+		if err := actionintegration.ValidateActionsCacheLifecycle(cacheOperation, m.Runs); err != nil {
+			return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: %w", selector.Lock, err)
+		}
 	}
 	return m, entry.lock, nil
 }

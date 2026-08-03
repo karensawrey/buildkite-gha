@@ -56,7 +56,7 @@ func TestCompileShellGoldenGraph(t *testing.T) {
 
 func TestCompileIsByteIdenticalAndCoversSmokeCorpus(t *testing.T) {
 	eventSource := readFile(t, smokePath("events", "push.json"))
-	for _, name := range []string{"shell.yml", "concurrent.yml", "ci.yml", "artifact.yml"} {
+	for _, name := range []string{"shell.yml", "concurrent.yml", "ci.yml", "artifact.yml", "cache.yml"} {
 		t.Run(name, func(t *testing.T) {
 			path := smokePath(".github", "workflows", name)
 			source := readFile(t, path)

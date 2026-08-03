@@ -679,15 +679,12 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
+func TestUnprivilegedUploadRejectsUnavailableGitHubServiceActions(t *testing.T) {
 	tests := []struct {
 		action  plan.ActionLock
 		service string
 	}{
 		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, "artifact"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache"}, "cache"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore"}, "cache"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "save"}, "cache"},
 	}
 	for _, test := range tests {
 		name := test.action.Repository
@@ -704,6 +701,32 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadAllowsCanonicalActionsCache(t *testing.T) {
+	for _, path := range []string{"", "restore", "save"} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "cache"},
+			Actions: []plan.ActionLock{{
+				Source: "github", Repository: "actions/cache", Path: path, RequestedRef: "v4.2.0",
+			}},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err != nil {
+			t.Fatalf("validateUnprivilegedBundle(actions/cache/%s) = %v", path, err)
+		}
+	}
+}
+
+func TestUnprivilegedUploadRejectsOldActionsCacheRefs(t *testing.T) {
+	for _, ref := range []string{"v1", "v3", "v4.1.9"} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "cache"},
+			Actions:  []plan.ActionLock{{Source: "github", Repository: "actions/cache", RequestedRef: ref}},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "v4.2.0") {
+			t.Fatalf("validateUnprivilegedBundle(actions/cache@%s) = %v", ref, err)
+		}
 	}
 }
 

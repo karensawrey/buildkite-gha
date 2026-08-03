@@ -314,6 +314,74 @@ func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) 
 	}
 }
 
+func TestCompileActionLocksActionsCacheVersionAndLifecycle(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, remote, "", "name: cache\nruns:\n  using: node24\n  main: index.js\n  post: post.js\n")
+	if err := os.WriteFile(filepath.Join(remote, "post.js"), []byte("// post\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeActionSource{root: remote, calls: map[string]int{}}
+	for _, ref := range []string{"v1", "v3.9.0", "v4.1.9"} {
+		if _, _, _, err := compileActionLocks(context.Background(), workspace, fake, []string{"actions/cache@" + ref}); err == nil || !strings.Contains(err.Error(), "v4.2.0") {
+			t.Fatalf("compileActionLocks(actions/cache@%s) error = %v", ref, err)
+		}
+		if fake.calls["actions/cache@"+ref] != 0 {
+			t.Fatalf("unsupported ref %q was resolved before rejection", ref)
+		}
+	}
+	selectors, locks, _, err := compileActionLocks(context.Background(), workspace, fake, []string{"actions/cache@v4.2.0"})
+	if err != nil || len(selectors) != 1 || len(locks) != 1 || locks[0].Repository != "actions/cache" {
+		t.Fatalf("compileActionLocks(actions/cache@v4.2.0) = %#v, %#v, %v", selectors, locks, err)
+	}
+
+	invalid := t.TempDir()
+	writeAction(t, invalid, "", "name: cache\nruns:\n  using: node24\n  pre: index.js\n  main: index.js\n  post: index.js\n")
+	if _, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: invalid, calls: map[string]int{}}, []string{"actions/cache@v4.2.0"}); err == nil || !strings.Contains(err.Error(), "pre lifecycle") {
+		t.Fatalf("compileActionLocks() lifecycle error = %v", err)
+	}
+}
+
+func TestCompilePlansRejectsActionsCacheInBackgroundGraphsAndJobContainers(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: cache\nruns:\n  using: node24\n  main: index.js\n  post: post.js\n")
+	if err := os.WriteFile(filepath.Join(remote, "post.js"), []byte("// post\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: actions/cache@v4.2.0\n")
+
+	for _, test := range []struct {
+		name, job string
+		want      string
+	}{
+		{name: "direct background", job: "    steps:\n      - uses: actions/cache@v4.2.0\n        background: true\n", want: "background actions/cache"},
+		{name: "transitive background", job: "    steps:\n      - uses: owner/repo/parent@main\n        background: true\n", want: "background actions/cache"},
+		{name: "job container", job: "    container: node:24\n    steps:\n      - uses: actions/cache@v4.2.0\n", want: "unsupported inside a job container"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := filepath.Join(workspace, ".github", "workflows", "cache.yml")
+			if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			workflow := []byte("on: push\njobs:\n  cache:\n    runs-on: ubuntu-latest\n" + test.job)
+			if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "cache-test", testDistributionDigest, Options{
+				EventTrust: EventUntrusted,
+				Runners: RunnerPolicy{
+					Labels: map[string]string{"ubuntu-latest": "hosted"}, UntrustedQueues: []string{"hosted"},
+				},
+				ResolveActions: true,
+				ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("CompilePlansWithOptions() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")

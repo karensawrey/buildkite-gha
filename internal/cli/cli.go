@@ -210,15 +210,16 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		actionMaterializer = store
 	}
 	runner := gharuntime.Runner{
-		Stdout:      stdout,
-		Stderr:      stderr,
-		MiseDataDir: prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
-		Docker:      os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:         os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:     gharuntime.EnvironmentSecrets{},
-		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-		Actions:     actionMaterializer,
-		Artifacts:   agent,
+		Stdout:             stdout,
+		Stderr:             stderr,
+		MiseDataDir:        prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		Docker:             os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:                os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets:            gharuntime.EnvironmentSecrets{},
+		Redactor:           gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:            actionMaterializer,
+		ActionsCacheTokens: gharuntime.NewAgentActionsCacheTokenSource(),
+		Artifacts:          agent,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -717,6 +718,10 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
+		locks := make(map[string]plan.ActionLock, len(artifact.Job.Actions))
+		for _, action := range artifact.Job.Actions {
+			locks[action.ID] = action
+		}
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
@@ -729,13 +734,55 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, action := range artifact.Job.Actions {
-			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
+			identity := actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}
+			descriptor, _ := actionintegration.Lookup(identity)
+			if descriptor.Service == actionintegration.ServiceCache {
+				if _, ok := actionintegration.ClassifyActionsCache(identity); !ok {
+					return fmt.Errorf("job %q has an unrecognized cache service action identity", artifact.Job.Workflow.LogicalJobID)
+				}
+				if err := actionintegration.ValidateActionsCacheRequestedRef(action.RequestedRef); err != nil {
+					return fmt.Errorf("job %q: %w", artifact.Job.Workflow.LogicalJobID, err)
+				}
+				continue
+			}
 			if descriptor.Service != "" {
 				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service)
 			}
 		}
+		if artifact.Job.Container != nil {
+			for _, action := range artifact.Job.Actions {
+				if _, ok := actionintegration.ClassifyActionsCache(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}); ok {
+					return fmt.Errorf("job %q uses actions/cache inside a job container", artifact.Job.Workflow.LogicalJobID)
+				}
+			}
+		}
+		for _, step := range artifact.Job.Steps {
+			if step.Background && step.Action != nil && unprivilegedActionGraphContainsCache(*step.Action, locks, map[string]bool{}) {
+				return fmt.Errorf("job %q background step %q contains actions/cache", artifact.Job.Workflow.LogicalJobID, step.ID)
+			}
+		}
 	}
 	return nil
+}
+
+func unprivilegedActionGraphContainsCache(selector plan.ActionSelector, locks map[string]plan.ActionLock, seen map[string]bool) bool {
+	if selector.Lock == "" || seen[selector.Lock] {
+		return false
+	}
+	seen[selector.Lock] = true
+	lock, ok := locks[selector.Lock]
+	if !ok {
+		return false
+	}
+	if _, ok := actionintegration.ClassifyActionsCache(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}); ok {
+		return true
+	}
+	for _, child := range lock.Children {
+		if unprivilegedActionGraphContainsCache(child, locks, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func irUsesActions(ir compiler.IR) bool {

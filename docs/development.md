@@ -68,9 +68,20 @@ evidence, not runtime evidence.
 
 The exact audited `actions/upload-artifact` and exact-name
 `actions/download-artifact` commits pass admission through bounded native
-adapters. Cache actions, artifact merge/broad download modes, and unsupported
-commits still fail admission. Job and service container fixtures have
-separate hosted runtime evidence but remain outside production admission.
+adapters. The canonical `actions/cache` root, restore, and save identities have
+experimental admission for host execution, including through nested
+composites; recognizable v1-v3 and pre-v4.2.0 refs, background use, and
+job-container use fail admission. Artifact merge/broad download modes and
+unsupported artifact commits also fail. Job and service container fixtures
+have separate hosted runtime evidence but remain outside production admission.
+
+Cache phases use the fixed `https://isaacsu-ghacs.buildkite.dev/` v2 results
+service, mint a fresh token per phase, and are capped at 14 minutes. Hosted
+agents must provide the upstream action's `tar` and `zstd` dependencies. The
+runtime strips Node/process and proxy injection variables before launching a
+credential-bearing phase; the service, rather than the runner, owns trust,
+namespace, and read/write policy. See the compatibility guide for the complete
+ref policy and security boundary.
 
 ### Hosted runtime proofs
 
@@ -99,6 +110,18 @@ phase selector only for targeted diagnosis:
 | Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
 | Upload-artifact publication | `PHASE6_PROBE=upload-artifact`, `PHASE6_COMMIT=<commit>` |
 | Artifact producer/consumer roundtrip | `PHASE6_PROBE=artifact-roundtrip`, `PHASE6_COMMIT=<commit>` |
+
+The cache preview proof remains separate from the network-free aggregate gate.
+Run it on a hosted agent against one exact implementation commit and the real
+preview service. Use two builds with the same unique cache key: the first must
+miss and save from the root action's post phase, and the second must restore the
+saved payload. The same proof must exercise `actions/cache/restore`,
+`actions/cache/save`, a cache action nested in a composite, and cancellation
+with an eligible root post. Independently inspect logs, outputs, state,
+summaries, workflow-command annotations, and artifacts for both the minted
+runtime token and `BUILDKITE_AGENT_ACCESS_TOKEN`. Record the exact commit,
+builds, generated job IDs, and read-only observations before claiming hosted
+runtime evidence; local fake-service tests are contract evidence only.
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After

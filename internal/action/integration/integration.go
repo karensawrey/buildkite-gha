@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
 
 // Identity is the canonical, resolved portion of an action lock used for
@@ -54,6 +57,19 @@ const (
 	ServiceCache    Service = "cache"
 )
 
+// ActionsCacheOperation identifies one supported canonical actions/cache
+// entry point. It is intentionally derived only from immutable action-lock
+// identity, never from a workflow's user-facing uses string.
+type ActionsCacheOperation string
+
+const (
+	ActionsCacheRoot    ActionsCacheOperation = "root"
+	ActionsCacheRestore ActionsCacheOperation = "restore"
+	ActionsCacheSave    ActionsCacheOperation = "save"
+)
+
+var actionsCacheVersionPattern = regexp.MustCompile(`^v?([0-9]+)(?:\.([0-9]+)(?:\.([0-9]+))?)?([-+].*)?$`)
+
 // Descriptor records Buildkite-specific handling for one exact action identity.
 type Descriptor struct {
 	Adapter Adapter
@@ -68,6 +84,79 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
+}
+
+// ClassifyActionsCache recognizes only the three canonical actions/cache
+// identities that may receive Buildkite cache-service credentials.
+func ClassifyActionsCache(identity Identity) (ActionsCacheOperation, bool) {
+	if identity.Source != "github" || identity.Repository != "actions/cache" {
+		return "", false
+	}
+	switch identity.Path {
+	case "":
+		return ActionsCacheRoot, true
+	case "restore":
+		return ActionsCacheRestore, true
+	case "save":
+		return ActionsCacheSave, true
+	default:
+		return "", false
+	}
+}
+
+// ValidateActionsCacheRequestedRef rejects recognizable releases older than
+// the minimum supported upstream action while deliberately allowing SHAs,
+// moving v4+ tags, and opaque branch names.
+func ValidateActionsCacheRequestedRef(ref string) error {
+	matches := actionsCacheVersionPattern.FindStringSubmatch(ref)
+	if matches == nil {
+		return nil
+	}
+	major, _ := strconv.Atoi(matches[1])
+	if major < 4 {
+		return fmt.Errorf("actions/cache requires v4.2.0 or newer; requested ref %q identifies unsupported major v%d", ref, major)
+	}
+	// A moving v4 (or newer) major tag is explicitly admitted.
+	if matches[2] == "" || major > 4 {
+		return nil
+	}
+	minor, _ := strconv.Atoi(matches[2])
+	patch := 0
+	if matches[3] != "" {
+		patch, _ = strconv.Atoi(matches[3])
+	}
+	prerelease := strings.HasPrefix(matches[4], "-")
+	if minor < 2 || minor == 2 && patch == 0 && prerelease {
+		return fmt.Errorf("actions/cache requires v4.2.0 or newer; requested ref %q is too old", ref)
+	}
+	return nil
+}
+
+// ValidateActionsCacheLifecycle fails closed if canonical cache metadata
+// changes from the supported Node main/post shape.
+func ValidateActionsCacheLifecycle(operation ActionsCacheOperation, runs metadata.Runs) error {
+	if runs.Using != string(metadata.RuntimeNode20) && runs.Using != string(metadata.RuntimeNode24) {
+		return fmt.Errorf("canonical actions/cache %s action requires a supported Node 20 or Node 24 runtime, got %q", operation, runs.Using)
+	}
+	if runs.Pre != "" || runs.PreIf != "" {
+		return fmt.Errorf("canonical actions/cache %s action may not declare a pre lifecycle", operation)
+	}
+	if runs.Main == "" {
+		return fmt.Errorf("canonical actions/cache %s action has no main entry point", operation)
+	}
+	switch operation {
+	case ActionsCacheRoot:
+		if runs.Post == "" {
+			return fmt.Errorf("canonical actions/cache root action has no post entry point")
+		}
+	case ActionsCacheRestore, ActionsCacheSave:
+		if runs.Post != "" || runs.PostIf != "" {
+			return fmt.Errorf("canonical actions/cache %s action may not declare a post lifecycle", operation)
+		}
+	default:
+		return fmt.Errorf("unknown actions/cache operation %q", operation)
+	}
+	return nil
 }
 
 // ValidateUploadArtifactCommit rejects semantic drift from the audited action.
