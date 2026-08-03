@@ -324,7 +324,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			if entry := actions.locks[step.Action.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
-			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
+			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -432,7 +432,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if post.action.cacheOperation != "" {
 			postCtx = context.Background()
 		}
-		postErr := r.runJavaScriptPhase(postCtx, processor, post.node, post.action, javaScriptPhasePost, post.action.Post, post.state, post.state, &postResult)
+		postErr := r.runJavaScriptPhase(postCtx, processor, workspace, post.node, post.action, javaScriptPhasePost, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
@@ -803,7 +803,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
+func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
 	result := newResult()
 	source, err := actions.source(*step.Action)
 	if err != nil {
@@ -879,7 +879,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
-			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhasePre, javascript.Pre, nil, invocation.state, &result); err != nil {
+			if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javaScriptPhasePre, javascript.Pre, nil, invocation.state, &result); err != nil {
 				return result, err
 			}
 		}
@@ -910,7 +910,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childEnv := mergeStepEnvironment(compositeEnv, result.Env)
 			eval.Env = childEnv
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, child, fmt.Sprintf("%s/%d", invocationID, i), childEnv, eval, posts, actions, prepared, status, compositeEvalErr)
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childEnv, eval, posts, actions, prepared, status, compositeEvalErr)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
@@ -1106,12 +1106,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if javascript.Pre != "" && !wasPrepared {
 			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
 			if runPre {
-				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhasePre, javascript.Pre, nil, state, &result); err != nil {
+				if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javaScriptPhasePre, javascript.Pre, nil, state, &result); err != nil {
 					return result, err
 				}
 			}
 		}
-		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javaScriptPhaseMain, javascript.Main, nil, state, &result); err != nil {
+		if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javaScriptPhaseMain, javascript.Main, nil, state, &result); err != nil {
 			return result, err
 		}
 		return result, nil

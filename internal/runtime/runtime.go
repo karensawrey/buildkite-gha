@@ -543,7 +543,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, phase javaScriptPhase, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action JavaScriptAction, phase javaScriptPhase, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -602,7 +602,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	err := r.runProcess(phaseCtx, processor, action.Path, env, result, stateOut, name, args...)
+	err := r.runProcess(phaseCtx, processor, workspace, env, result, stateOut, name, args...)
 	if protectedToken != "" {
 		leaked := processor.endProtected(protectedToken) || resultContains(*result, protectedToken) || errorContains(err, protectedToken)
 		if leaked {
